@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <title>角色生成 × 自然動態互動系統</title>
+    <script>
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            let errorDiv = document.createElement('div');
+            errorDiv.style.cssText = "position:absolute; top: 100px; left: 20px; color: red; z-index: 9999; background: white; padding: 10px; border: 1px solid red; font-size: 16px; font-family: monospace;";
+            errorDiv.innerHTML = 'JS 錯誤: ' + msg + '<br>行數: ' + lineNo;
+            document.body.appendChild(errorDiv);
+            return false;
+        };
+    </script>
+    <style>
+        body {
+            margin: 0;
+            background: url('wedding_bg.png') no-repeat center center / cover;
+            color: #333;
+            font-family: 'Helvetica Neue', sans-serif;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: crosshair;
+        }
+
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 280px;
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            padding: 15px;
+            z-index: 10;
+            border: 1px solid rgba(255, 255, 255, 0.8);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+        }
+
+        #coord-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #0f0;
+            font-family: monospace;
+            padding: 10px;
+            border-radius: 6px;
+            z-index: 100;
+            pointer-events: none;
+        }
+
+        .desc {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+
+        .action-btn {
+            width: 100%;
+            padding: 10px;
+            background: #ffb6c1; /* Romantic pink */
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        
+        .action-btn:hover {
+            background: #ff9eab;
+        }
+
+        #header-info {
+            position: absolute;
+            top: 30px;
+            left: 30px;
+            pointer-events: none;
+        }
+
+        #header-info h1 {
+            margin: 0;
+            font-size: 28px;
+            color: #fff;
+            text-shadow: 0px 2px 5px rgba(0,0,0,0.3);
+            font-family: 'Georgia', serif;
+        }
+        
+        #header-info p {
+            color: #ffe4e1;
+            text-shadow: 0px 1px 3px rgba(0,0,0,0.3);
+        }
+    </style>
+    
+    <!-- Include PixiJS local file -->
+    <script src="node_modules/pixi.js/dist/pixi.min.js"></script>
+</head>
+
+<body>
+
+    <div id="header-info">
+        <h1>浪漫婚禮 × 空間共創</h1>
+        <p>💍 見證幸福的相遇時刻</p>
+    </div>
+
+    <div id="ui-panel">
+        <p class="desc">小熊們在浪漫的婚禮會場中漫步，遇見彼此時會停下來互相打招呼。</p>
+        <button id="photoBtn" class="action-btn">📸 召集拍攝婚禮大合照</button>
+    </div>
+
+    <!-- 座標顯示面板 -->
+    <div id="coord-panel">Screen: (0, 0)<br>Original: (0, 0)</div>
+
+    <!-- PixiJS will append its canvas here -->
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- 1. 基礎向量類 ---
+        class Vec2 {
+            constructor(x, y) { this.x = x || 0; this.y = y || 0; }
+            add(v) { this.x += v.x; this.y += v.y; return this; }
+            sub(v) { this.x -= v.x; this.y -= v.y; return this; }
+            mult(n) { this.x *= n; this.y *= n; return this; }
+            div(n) { if (n !== 0) { this.x /= n; this.y /= n; } return this; }
+            magSq() { return this.x * this.x + this.y * this.y; }
+            mag() { return Math.sqrt(this.magSq()); }
+            normalize() { let m = this.mag(); if (m > 0) this.div(m); return this; }
+            limit(max) { if (this.magSq() > max * max) { this.normalize(); this.mult(max); } return this; }
+            dist(v) { return Math.sqrt((this.x - v.x) ** 2 + (this.y - v.y) ** 2); }
+            static sub(v1, v2) { return new Vec2(v1.x - v2.x, v1.y - v2.y); }
+        }
+
+        const TOTAL_BOIDS = 12;
+        const flock = [];
+        let isPhotoTime = false;
+
+        // 這個函數確保去背的物件圖層，永遠會跟著 CSS 的 background: cover 進行完美縮放對齊
+        function resizeForegrounds() {
+            if (!window.foregroundSprites) return;
+            let imgW = 1264; // 原始大圖的寬度
+            let imgH = 848;  // 原始大圖的高度
+            let winW = window.innerWidth;
+            let winH = window.innerHeight;
+            
+            let scale = Math.max(winW / imgW, winH / imgH);
+            let x = (winW - imgW * scale) / 2;
+            let y = (winH - imgH * scale) / 2;
+            
+            // 儲存當前縮放資訊供座標轉換使用
+            window.bgTransform = { scale, x, y };
+            
+            window.foregroundSprites.forEach(sprite => {
+                sprite.scale.set(scale);
+                sprite.x = x;
+                sprite.y = y;
+                // 將物件的「深度」設定在它接觸地面的實體 Y 座標上
+                sprite.zIndex = y + sprite.baseY * scale;
+            });
+        }
+
+        let pixiApp;
+        let bgContainer;
+        // 原 wedding_bg.png 配套的去背物件圖層；與樂高人一同互動
+        const SHOW_LEGACY_FG_OBJECTS = true;
+
+        // --- 程式繪製婚禮場景 ---
+        function drawBackground() {
+            // 背景已使用 CSS 原圖，這裡不需要再畫黃色色塊了
+            if (window.stageGraphics) {
+                pixiApp.stage.removeChild(window.stageGraphics);
+                window.stageGraphics.destroy();
+                window.stageGraphics = null;
+            }
+        }
+
+
+        // --- 樂高人角色類別 ---
+        class LegoCharacter extends PIXI.Container {
+            constructor(topColor = 0xC81E1E, bottomColor = 0x2A52BE) {
+                super();
+                this.topColor = topColor;
+                this.bottomColor = bottomColor;
+                this.skinColor = 0xFFCC00; // lego yellow
+                
+                this.inner = new PIXI.Container();
+                this.inner.scale.set(2.5);
+                this.inner.sortableChildren = true;
+                this.addChild(this.inner);
+                
+                this.walkPhase = 0; // 累積相位，避免 sin 跳動導致脚抽搎
+
+                this.legGap = 1.5;
+                this.legW = 21;
+                this.torsoH = 50;
+                this.shoulderOffsetX = 19; // 對齊身體頂部邊緣
+                this.shoulderY = -this.torsoH/2 + 2;
+
+                // 左腿
+                this.leftLeg = this.createLeg();
+                this.leftLeg.x = -this.legW/2 - this.legGap;
+                this.leftLeg.y = this.torsoH/2;
+                this.inner.addChild(this.leftLeg);
+
+                // 右腿
+                this.rightLeg = this.createLeg();
+                this.rightLeg.x = this.legW/2 + this.legGap;
+                this.rightLeg.y = this.torsoH/2;
+                this.inner.addChild(this.rightLeg);
+
+                // 身體
+                this.body = this.createBody();
+                this.body.zIndex = 3;
+                this.inner.addChild(this.body);
+
+                // 左臂
+                this.leftArm = this.createArm();
+                this.leftArm.x = -this.shoulderOffsetX;
+                this.leftArm.y = this.shoulderY;
+                this.inner.addChild(this.leftArm);
+
+                // 右臂
+                this.rightArm = this.createArm();
+                this.rightArm.x = this.shoulderOffsetX;
+                this.rightArm.y = this.shoulderY;
+                this.inner.addChild(this.rightArm);
+
+                // 頭部
+                this.head = this.createHead();
+                this.head.zIndex = 6;
+                this.inner.addChild(this.head);
+                
+                // 護目鏡 (獨立部位，可開關)
+                this.glasses = this.createGlasses();
+                this.glasses.zIndex = 7;
+                this.glasses.visible = false;
+                this.inner.addChild(this.glasses);
+
+                // 初次上色
+                this.updateColors(this.topColor, this.bottomColor);
+            }
+            
+            createLeg() {
+                let legC = new PIXI.Container();
+                let leg = new PIXI.Graphics();
+                leg.beginFill(0xFFFFFF); // White for tinting
+                leg.lineStyle(1.5, 0x000000);
+                leg.drawRect(-10.5, 0, 21, 38);
+                leg.drawRoundedRect(-11.5, 38, 23, 10, 2);
+                leg.endFill();
+                legC.addChild(leg);
+                legC.base = leg;
+                return legC;
+            }
+            
+            createArm() {
+                let armC = new PIXI.Container();
+                let sleeve = new PIXI.Graphics();
+                sleeve.beginFill(0xFFFFFF); // White for tinting
+                sleeve.lineStyle(1.5, 0x000000);
+                sleeve.drawRoundedRect(-6.5, 0, 13, 40, 5);
+                sleeve.endFill();
+                
+                let hand = new PIXI.Graphics();
+                hand.beginFill(this.skinColor);
+                hand.lineStyle(1.5, 0x000000);
+                let rIn = 5, rOut = 10;
+                hand.moveTo(rOut * Math.cos(Math.PI), rOut * Math.sin(Math.PI) + 45);
+                for (let a = 180; a <= 360; a += 10) {
+                    let x = rOut * Math.cos(a * Math.PI / 180);
+                    let y = rOut * Math.sin(a * Math.PI / 180) + 45;
+                    hand.lineTo(x, y);
+                }
+                for (let a = 360; a >= 180; a -= 10) {
+                    let x = rIn * Math.cos(a * Math.PI / 180);
+                    let y = rIn * Math.sin(a * Math.PI / 180) + 45;
+                    hand.lineTo(x, y);
+                }
+                hand.closePath();
+                hand.endFill();
+                
+                armC.addChild(sleeve);
+                armC.addChild(hand);
+                armC.base = sleeve;
+                return armC;
+            }
+            
+            createBody() {
+                let body = new PIXI.Graphics();
+                body.beginFill(0xFFFFFF);
+                body.lineStyle(1.5, 0x000000);
+                body.moveTo(-19, -25);
+                body.lineTo(19, -25);
+                body.lineTo(25, 25);
+                body.lineTo(-25, 25);
+                body.endFill();
+                return body; 
+            }
+            
+            createHead() {
+                let headC = new PIXI.Container();
+                
+                let headShape = new PIXI.Graphics();
+                headShape.beginFill(this.skinColor);
+                headShape.lineStyle(1.5, 0x000000);
+                // 脖子
+                headShape.drawRect(-8, -29, 16, 4);
+                // 頭主體
+                headShape.drawRoundedRect(-19.25, -64, 38.5, 35, 8);
+                // 頂部凸起
+                headShape.drawRoundedRect(-9, -70.5, 18, 7, 2);
+                headShape.endFill();
+                
+                let face = new PIXI.Graphics();
+                // 臉部表情
+                face.beginFill(0x000000);
+                face.drawCircle(-8, -48, 2.5); // 左眼
+                face.drawCircle(8, -48, 2.5);  // 右眼
+                face.endFill();
+                
+                face.lineStyle(1.5, 0x000000);
+                face.moveTo(-6, -42);
+                face.quadraticCurveTo(0, -38, 6, -42); // 微笑
+                
+                // 將五官稍微往「前方」(預設面向右) 偏移，營造微微側臉的立體感
+                face.x = 4;
+                
+                headC.addChild(headShape);
+                headC.addChild(face);
+                
+                return headC;
+            }
+
+            createGlasses() {
+                let glasses = new PIXI.Graphics();
+                glasses.beginFill(0x33CCFF, 0.7); // 半透明藍色鏡片
+                glasses.lineStyle(1.5, 0x000000);
+                glasses.drawRoundedRect(-16, -56, 32, 12, 4);
+                glasses.endFill();
+                // 鏡架帶
+                glasses.lineStyle(2, 0x333333);
+                glasses.moveTo(-16, -50);
+                glasses.lineTo(-20, -50);
+                glasses.moveTo(16, -50);
+                glasses.lineTo(20, -50);
+                return glasses;
+            }
+
+            darken(hexColor) {
+                let r = (hexColor >> 16) & 0xFF;
+                let g = (hexColor >> 8) & 0xFF;
+                let b = hexColor & 0xFF;
+                r = Math.floor(r * 0.6);
+                g = Math.floor(g * 0.6);
+                b = Math.floor(b * 0.6);
+                return (r << 16) | (g << 8) | b;
+            }
+
+            updateColors(topColor, bottomColor) {
+                if (topColor !== undefined) this.topColor = topColor;
+                if (bottomColor !== undefined) this.bottomColor = bottomColor;
+            }
+            
+            updateAnimation(isWalking, isMovingRight, time, isGreeting = false, speedMag = 1.0) {
+                // 累積相位：根據實際速度平滑增加，避免因速度跨幅變動導致 sin 相位跳越
+                if (isWalking) {
+                    this.walkPhase += speedMag * 0.10; // 速度 1.0 時，約 63 幀一個完整步態循環
+                }
+                let swing = isWalking ? Math.sin(this.walkPhase) : 0;
+                let armAngle = (18 * Math.PI / 180) * swing;
+                let legAngle = (20 * Math.PI / 180) * swing;
+                
+                // 頭部面向翻轉
+                let leftIsFront = false;
+                if (isMovingRight) {
+                    this.head.scale.x = 1;
+                    if (this.glasses) this.glasses.scale.x = 1;
+                    leftIsFront = true;  // 往右走 → 左側面對鏡頭 → 左手/左腳在前
+                } else {
+                    this.head.scale.x = -1;
+                    if (this.glasses) this.glasses.scale.x = -1;
+                    leftIsFront = false; // 往左走 → 右側面對鏡頭 → 右手/右腳在前
+                }
+                
+                // Z-index 與顏色深淺（決定前後腳/手）
+                if (leftIsFront) {
+                    this.leftArm.zIndex = 5;
+                    this.leftLeg.zIndex = 4;
+                    this.rightArm.zIndex = 1;
+                    this.rightLeg.zIndex = 2;
+                    this.leftArm.base.tint = this.topColor;
+                    this.leftLeg.base.tint = this.bottomColor;
+                    this.rightArm.base.tint = this.darken(this.topColor);
+                    this.rightLeg.base.tint = this.darken(this.bottomColor);
+                } else {
+                    this.leftArm.zIndex = 1;
+                    this.leftLeg.zIndex = 2;
+                    this.rightArm.zIndex = 5;
+                    this.rightLeg.zIndex = 4;
+                    this.rightArm.base.tint = this.topColor;
+                    this.rightLeg.base.tint = this.bottomColor;
+                    this.leftArm.base.tint = this.darken(this.topColor);
+                    this.leftLeg.base.tint = this.darken(this.bottomColor);
+                }
+                this.body.tint = this.topColor;
+
+                const lerp = 0.18; // 插值係數：越小越平滑，越大越即時
+                let idleBackArmRotation = 15 * Math.PI / 180;
+
+                let tLeftArm, tRightArm, tLeftLeg, tRightLeg;
+
+                if (isWalking) {
+                    tLeftArm  =  armAngle;
+                    tRightArm = -armAngle;
+                    tLeftLeg  = -legAngle;
+                    tRightLeg =  legAngle;
+                } else {
+                    tLeftLeg  = 0;
+                    tRightLeg = 0;
+                    if (isMovingRight) {
+                        tLeftArm  = idleBackArmRotation;
+                        tRightArm = 0;
+                    } else {
+                        tLeftArm  = 0;
+                        tRightArm = -idleBackArmRotation;
+                    }
+                }
+
+                // 平滑插值，消除走路↔停止之間的瞬間跳動
+                this.leftArm.rotation  += (tLeftArm  - this.leftArm.rotation)  * lerp;
+                this.rightArm.rotation += (tRightArm - this.rightArm.rotation) * lerp;
+                this.leftLeg.rotation  += (tLeftLeg  - this.leftLeg.rotation)  * lerp;
+                this.rightLeg.rotation += (tRightLeg - this.rightLeg.rotation) * lerp;
+
+                let bounce = isWalking ? Math.abs(Math.sin(this.walkPhase)) * 3 : 0;
+                this.inner.y = -bounce; 
+            }
+        }
+
+        class Boid {
+            constructor(x, y, characterDisplay) {
+                this.pos = new Vec2(x, y);
+                this.isWalkingToGreet = false;
+                this.greetingTargetPos = null;
+                this.greetPartner = null;
+                this.lastGreetPartner = null;
+                this.ignorePartnerTimer = 0;
+                this.vel = new Vec2(Math.random() * 2 - 1, Math.random() * 2 - 1).normalize().mult(1.0);
+                this.acc = new Vec2(0, 0);
+                this.photoTarget = null;
+                
+                // 走走停停的時間計數器
+                this.walkTimer = Math.random() * 200 + 100;
+                this.restTimer = 0;
+                
+                this.container = new PIXI.Container();
+                
+                this.shadow = new PIXI.Graphics();
+                // 使用多層次疊加模擬柔和陰影，避免使用 WebGL Filter 導致的破圖問題
+                for (let i = 0; i < 6; i++) {
+                    this.shadow.beginFill(0x000000, 0.08); 
+                    this.shadow.drawEllipse(0, 0, 45 - i * 3, 12 - i * 0.8);
+                    this.shadow.endFill();
+                }
+                
+                this.characterDisplay = characterDisplay;
+                
+                // 把縮放倍率調整，讓樂高人與背景比例協調
+                this.characterDisplay.scale.set(0.4);
+                this.characterDisplay.x = 0;
+                this.characterDisplay.y = 0;
+                
+                this.container.addChild(this.shadow);
+                this.container.addChild(this.characterDisplay);
+                
+                this.container.x = x;
+                this.container.y = y;
+
+                pixiApp.stage.addChild(this.container);
+            }
+
+            startGreeting(target) {
+                this.turnCooldown = 120; // 打招呼也改成只停 2 秒 (原本是 300 frames = 5 秒)
+                this.vel.mult(0);
+                this.acc.mult(0);
+                this.lastGreetPartner = target;
+                this.ignorePartnerTimer = 600; // 10秒內(600 frames)不要再跟同一個人打招呼
+            }
+
+            update() {
+                if (this.turnCooldown === undefined) this.turnCooldown = 0;
+                if (this.turnCooldown > 0) this.turnCooldown--;
+                
+                if (this.ignorePartnerTimer > 0) {
+                    this.ignorePartnerTimer--;
+                    if (this.ignorePartnerTimer <= 0) {
+                        this.lastGreetPartner = null;
+                    }
+                }
+
+                let isTurning = this.turnCooldown > 0;
+                let turnCompleted = this.turnCooldown === 0;
+
+                // ====== Physics & AI Update ======
+                if (isPhotoTime && this.photoTarget) {
+                    let diff = Vec2.sub(this.photoTarget, this.pos);
+                    let dist = diff.mag();
+                    if (dist > 2) {
+                        let dir = diff.normalize().mult(3.5); 
+                        this.vel = dir;
+                        this.pos.add(this.vel);
+                    } else {
+                        this.pos.x = this.photoTarget.x;
+                        this.pos.y = this.photoTarget.y;
+                        this.vel.mult(0);
+                    }
+                } else if (this.isWalkingToGreet) {
+                    let dist = this.pos.dist(this.greetingTargetPos);
+                    if (dist < 2) {
+                        this.pos.x = this.greetingTargetPos.x;
+                        this.pos.y = this.greetingTargetPos.y;
+                        this.isWalkingToGreet = false;
+                        
+                        this.startGreeting(this.greetPartner);
+                        this.greetPartner = null;
+                        
+                        isTurning = true;
+                        turnCompleted = false;
+                    } else {
+                        let dir = Vec2.sub(this.greetingTargetPos, this.pos).normalize().mult(1.0);
+                        this.vel = dir;
+                        this.pos.add(this.vel);
+                    }
+                } else {
+                    if (isTurning) {
+                        this.vel.mult(0);
+                        this.acc.mult(0);
+                    } else {
+                        for (let other of flock) {
+                            if (other !== this) {
+                                let diff = Vec2.sub(this.pos, other.pos);
+                                let d = diff.mag();
+                                if (d > 0 && d < 80) { 
+                                    if (this.greetPartner !== other) {
+                                        let force = diff.normalize().mult(0.1);
+                                        this.acc.add(force);
+                                    }
+                                    
+                                    let otherIsTurning = other.turnCooldown > 0;
+                                    let yDist = Math.abs(this.pos.y - other.pos.y);
+                                    
+                                    if (!isTurning && this.turnCooldown === 0 && !this.isWalkingToGreet &&
+                                        !otherIsTurning && other.turnCooldown === 0 && !other.isWalkingToGreet && 
+                                        yDist < 40 &&
+                                        this.lastGreetPartner !== other && other.lastGreetPartner !== this) {
+                                        
+                                        let midX = (this.pos.x + other.pos.x) / 2;
+                                        let midY = (this.pos.y + other.pos.y) / 2;
+                                        
+                                        let thisTargetX, otherTargetX;
+                                        if (this.pos.x <= other.pos.x) {
+                                            thisTargetX = midX - 35;
+                                            otherTargetX = midX + 35;
+                                        } else {
+                                            thisTargetX = midX + 35;
+                                            otherTargetX = midX - 35;
+                                        }
+
+                                        this.isWalkingToGreet = true;
+                                        this.greetingTargetPos = new Vec2(thisTargetX, midY);
+                                        this.greetPartner = other;
+                                        
+                                        other.isWalkingToGreet = true;
+                                        other.greetingTargetPos = new Vec2(otherTargetX, midY);
+                                        other.greetPartner = this;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 確保如果速度過低且沒有在休息（例如剛打完招呼），就給他一個新方向
+                        if (this.vel.mag() < 0.1 && this.restTimer <= 0) {
+                            this.walkTimer = Math.random() * 200 + 100;
+                            this.vel = new Vec2(Math.random() * 2 - 1, Math.random() * 2 - 1).normalize().mult(1.0);
+                        }
+                    }
+                }
+
+                if (!isTurning && !this.isWalkingToGreet && !isPhotoTime) {
+                    // --- 走走停停邏輯 ---
+                    if (this.restTimer > 0) {
+                        this.restTimer--;
+                        this.vel.mult(0.85); // 快速減速煞車
+                        if (this.restTimer <= 0) {
+                            // 休息完畢，重新開始走
+                            this.walkTimer = Math.random() * 200 + 100;
+                            this.vel = new Vec2(Math.random() * 2 - 1, Math.random() * 2 - 1).normalize().mult(1.0);
+                        }
+                    } else {
+                        this.walkTimer--;
+                        if (this.walkTimer <= 0) {
+                            // 走累了，開始休息 (固定停下 2 秒 = 120 frames @ 60fps)
+                            this.restTimer = 120; 
+                        }
+                    }
+
+                    this.vel.add(this.acc);
+                    if (this.restTimer <= 0) {
+                        this.vel.limit(1.3); // 減慢行走速度
+                    }
+                    this.pos.add(this.vel);
+                    this.acc.mult(0);
+
+                    let floorTop = pixiApp.screen.height * 0.35; 
+                    let floorBottom = pixiApp.screen.height * 0.9; 
+
+                    if (this.pos.y > floorBottom) { 
+                        this.pos.y = floorBottom; 
+                        this.vel.y = -Math.abs(this.vel.y); 
+                    }
+                    if (this.pos.y < floorTop) { 
+                        this.pos.y = floorTop; 
+                        this.vel.y = Math.abs(this.vel.y); 
+                    }
+
+                    let t = (this.pos.y - floorTop) / (floorBottom - floorTop);
+                    t = Math.max(0, Math.min(1, t)); 
+
+                    let floorLeft = pixiApp.screen.width * (0.35 - 0.2 * t);
+                    let floorRight = pixiApp.screen.width * (0.65 + 0.2 * t);
+
+                    if (this.pos.x > floorRight) { 
+                        this.pos.x = floorRight; 
+                        this.vel.x = -Math.abs(this.vel.x); 
+                    }
+                    if (this.pos.x < floorLeft) { 
+                        this.pos.x = floorLeft; 
+                        this.vel.x = Math.abs(this.vel.x); 
+                    }
+                }
+
+                this.container.x = this.pos.x;
+                this.container.y = this.pos.y;
+                
+                let floorTop = pixiApp.screen.height * 0.35;
+                let floorBottom = pixiApp.screen.height * 0.9;
+                let tDepth = (this.pos.y - floorTop) / (floorBottom - floorTop);
+                tDepth = Math.max(0, Math.min(1, tDepth));
+                
+                // 動態排序 Y 軸 (Z-Ordering)
+                this.container.zIndex = this.pos.y;
+
+                // 透視縮放
+                let perspectiveScale = 0.5 + 0.6 * tDepth; 
+                this.container.scale.set(perspectiveScale);
+
+                let isMovingRight = this.vel.x >= 0;
+                if (isTurning && this.lastGreetPartner) {
+                    // 打招呼時，面向剛剛打招呼的對象
+                    isMovingRight = (this.lastGreetPartner.pos.x - this.pos.x) > 0;
+                } else if (this.isWalkingToGreet && this.greetingTargetPos) {
+                    isMovingRight = (this.greetingTargetPos.x - this.pos.x) > 0;
+                }
+                
+                let speedMag = this.vel.mag();
+                let isWalking = speedMag > 0.1;
+                
+                // 更新樂高人動畫 (如果正在 isTurning 代表正在打招呼)
+                this.characterDisplay.updateAnimation(isWalking, isMovingRight, pixiApp.ticker.lastTime, isTurning, speedMag);
+            }
+        }
+
+        function initPixi() {
+            pixiApp = new PIXI.Application({
+                width: window.innerWidth,
+                height: window.innerHeight,
+                transparent: true,
+                resizeTo: window,
+                resolution: window.devicePixelRatio || 1, // 支援高畫質螢幕 (Retina)
+                autoDensity: true                    // 自動調整 CSS 尺寸
+            });
+            document.getElementById('canvas-container').appendChild(pixiApp.view);
+            pixiApp.stage.sortableChildren = true;
+
+            pixiApp.loader
+                .add("fg1234", "objects/1234.png")
+                .add("fg234", "objects/234.png")
+                .add("fg345", "objects/345.png")
+                .add("fg456", "objects/456.png")
+                .add("fg567", "objects/567.png")
+                .add("bgOriginal", "wedding_bg.png")
+                .load(onAssetsLoaded);
+        }
+
+        function onAssetsLoaded(loader, resources) {
+            drawBackground();
+
+            window.foregroundSprites = [];
+            if (SHOW_LEGACY_FG_OBJECTS) {
+                let fgs = [
+                    { name: 'fg1234', baseY: 358 },
+                    { name: 'fg234', baseY: 210 },
+                    { name: 'fg345', baseY: 794 },
+                    { name: 'fg456', baseY: 463 },
+                    { name: 'fg567', baseY: 760 }
+                ];
+
+                fgs.forEach(fg => {
+                    if (resources[fg.name] && resources[fg.name].texture) {
+                        let sprite = new PIXI.Sprite(resources[fg.name].texture);
+                        sprite.baseY = fg.baseY;
+                        pixiApp.stage.addChild(sprite);
+                        window.foregroundSprites.push(sprite);
+                    }
+                });
+            }
+
+            window.addEventListener('resize', () => {
+                drawBackground();
+                resizeForegrounds();
+            });
+            resizeForegrounds();
+
+            for (let i = 0; i < TOTAL_BOIDS; i++) {
+                const randomTopColor = Math.floor(Math.random() * 0xFFFFFF);
+                const randomBottomColor = Math.floor(Math.random() * 0xFFFFFF);
+                
+                let characterDisplay = new LegoCharacter(randomTopColor, randomBottomColor);
+                // 模擬稍微調暗融入環境
+                characterDisplay.alpha = 0.95;
+                
+                let floorTop = pixiApp.screen.height * 0.35;
+                let floorBottom = pixiApp.screen.height * 0.9;
+                let ry = floorTop + Math.random() * (floorBottom - floorTop);
+                
+                let t = (ry - floorTop) / (floorBottom - floorTop);
+                let floorLeft = pixiApp.screen.width * (0.35 - 0.2 * t);
+                let floorRight = pixiApp.screen.width * (0.65 + 0.2 * t);
+                
+                let rx = floorLeft + Math.random() * (floorRight - floorLeft);
+                
+                let boid = new Boid(rx, ry, characterDisplay);
+                boid.boidId = "user_" + i; 
+                flock.push(boid);
+            }
+
+            pixiApp.ticker.add(() => {
+                flock.forEach(boid => boid.update());
+                pixiApp.stage.children.sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
+            });
+        }
+
+        document.getElementById('photoBtn').onclick = () => {
+            isPhotoTime = !isPhotoTime;
+            if (isPhotoTime) {
+                flock.forEach((b, i) => {
+                    b.photoTarget = new Vec2(
+                        pixiApp.screen.width / 2 - 300 + (i % 5) * 150, 
+                        pixiApp.screen.height * 0.6 + Math.floor(i / 5) * 120
+                    );
+                });
+            }
+        };
+
+        // ====== 新增：滑鼠座標追蹤系統 ======
+        window.addEventListener('mousemove', (e) => {
+            let coordPanel = document.getElementById('coord-panel');
+            if (coordPanel && window.bgTransform) {
+                // 將螢幕座標轉換回 1264x848 的原圖座標
+                let origX = Math.round((e.clientX - window.bgTransform.x) / window.bgTransform.scale);
+                let origY = Math.round((e.clientY - window.bgTransform.y) / window.bgTransform.scale);
+                coordPanel.innerHTML = `Screen: (${e.clientX}, ${e.clientY})<br>Original: (${origX}, ${origY})`;
+            }
+        });
+
+        // ======= Phase 1: 更衣間資料串接 (BroadcastChannel) =======
+        const channel = new BroadcastChannel('avatar_sync');
+        channel.onmessage = (event) => {
+            const data = event.data;
+            if (!data) return;
+            
+            let targetBoid = flock.find(b => b.boidId === data.boidId) || flock[0];
+            if (!targetBoid) return;
+
+            // 1. 替換衣服顏色 (topColor) & 2. 褲子顏色 (bottomColor)
+            let topHex = undefined;
+            if (data.topColor) topHex = parseInt(data.topColor.replace('#', '0x'));
+            let botHex = undefined;
+            if (data.bottomColor) botHex = parseInt(data.bottomColor.replace('#', '0x'));
+            
+            targetBoid.characterDisplay.updateColors(topHex, botHex);
+
+            // 3. 護目鏡開關 (hasGlasses)
+            if (data.hasOwnProperty('hasGlasses')) {
+                targetBoid.characterDisplay.glasses.visible = data.hasGlasses;
+            }
+            
+            console.log("👗 收到更衣間更新！已為角色換裝：", data);
+        };
+
+        window.testOutfit = (outfitData) => {
+            channel.onmessage({ data: outfitData }); 
+        };
+
+        initPixi();
+    </script>
+</body>
+
+</html>

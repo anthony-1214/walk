@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lego Figure (p5.js)</title>
+    <!-- 引入 p5.js 函式庫 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+    <script>
+        let scaleFactor = 3.5; 
+
+        function setup() {
+          createCanvas(600, 800);
+          // 移除 noLoop() 讓 p5.js 持續執行 draw() 來產生動畫
+        }
+
+        function draw() {
+          background(240);
+          
+          // --- 計算走路動畫角度 ---
+          // 利用 frameCount 配合 sin() 函數做出週期性的擺動
+          let speed = 0.1;
+          let swing = sin(frameCount * speed);
+          
+          // 手臂和腿部擺動角度 (彼此反相)
+          let armAngle = radians(30) * swing;
+          let legAngle = radians(25) * swing;
+          
+          // 走路時身體微幅上下彈跳
+          let bounce = abs(sin(frameCount * speed)) * 3 * scaleFactor;
+          
+          // --- 計算左右移動 (5秒一趟) ---
+          let cycleTime = 5000; // 5秒 = 5000毫秒
+          let t = millis();
+          let totalCycle = cycleTime * 2; // 10秒一個完整來回
+          let timeInCycle = t % totalCycle;
+          
+          let currentX;
+          // 設定走路範圍 (從畫面左邊 150 走到右邊 450)
+          let startX = 150;
+          let endX = width - 150;
+          
+          if (timeInCycle < cycleTime) {
+            // 前5秒：從左走到右
+            let progress = timeInCycle / cycleTime;
+            currentX = lerp(startX, endX, progress);
+          } else {
+            // 後5秒：從右走回左
+            let progress = (timeInCycle - cycleTime) / cycleTime;
+            currentX = lerp(endX, startX, progress);
+          }
+          
+          translate(currentX, height / 2 - 50 - bounce);
+
+          // --- 顏色定義 ---
+          let legoRed = color(200, 30, 30);   
+          let legoYellow = color(255, 204, 0);
+          
+          stroke(0);
+          strokeWeight(1.5 * scaleFactor);
+
+          let tTop = 38 * scaleFactor;
+          let tBottom = 50 * scaleFactor;
+          let torsoH = 50 * scaleFactor; 
+
+          // 1. 先把左右手臂的繪圖打包成獨立函數
+          let aW = 13 * scaleFactor;
+          let aL = 40 * scaleFactor;
+          let shoulderY = -torsoH/2 + 3 * scaleFactor;
+          // 為了讓「手在身體後面」的視覺效果更明顯，我把肩膀往內縮一點點
+          let shoulderOffsetX = tTop/2 - 4 * scaleFactor; 
+
+          function drawLeftArm() {
+            push();
+            translate(-shoulderOffsetX, shoulderY);
+            rotate(armAngle); 
+            // 如果手往後甩(角度小於0)，稍微把顏色調暗一點點製造陰影深度
+            fill(armAngle < 0 ? color(170, 20, 20) : legoRed);
+            rectMode(CORNER);
+            rect(-aW, 0, aW, aL, 5 * scaleFactor);
+            
+            translate(-aW/2, aL + 5 * scaleFactor); 
+            drawCHandDown(scaleFactor, armAngle < 0 ? color(220, 180, 0) : legoYellow);
+            pop();
+          }
+
+          function drawRightArm() {
+            push();
+            translate(shoulderOffsetX, shoulderY);
+            rotate(-armAngle);
+            fill(-armAngle < 0 ? color(170, 20, 20) : legoRed);
+            rectMode(CORNER);
+            rect(0, 0, aW, aL, 5 * scaleFactor);
+            
+            translate(aW/2, aL + 5 * scaleFactor);
+            drawCHandDown(scaleFactor, -armAngle < 0 ? color(220, 180, 0) : legoYellow);
+            pop();
+          }
+
+          let legW = 21 * scaleFactor;
+          let legH = 38 * scaleFactor;
+          let footH = 10 * scaleFactor;
+          let legGap = 1.5 * scaleFactor;
+
+          // 判斷行走方向：timeInCycle < cycleTime 代表正在「往右走」
+          let isMovingRight = timeInCycle < cycleTime;
+          
+          // 如果往右走，靠近螢幕(前面)的會是左手/左腳，遠方(後面)的會是右手/右腳
+          // 反之如果往左走，靠近螢幕的會是右手/右腳
+          let leftIsFront = isMovingRight;
+
+          // ================= 開始按照「深度 (Z-Index)」順序畫 =================
+          
+          // 1. 畫「遠處(後面)」的那隻手 (會被身體擋住)
+          if (leftIsFront) {
+            drawRightArm();
+          } else {
+            drawLeftArm();
+          }
+
+          // 2. 畫「遠處(後面)」的腿 (調暗一點)
+          if (leftIsFront) {
+            // 右腳在遠處
+            drawLeg(legW/2 + legGap, torsoH/2, legW, legH, footH, color(170, 20, 20), legAngle);
+          } else {
+            // 左腳在遠處
+            drawLeg(-legW/2 - legGap, torsoH/2, legW, legH, footH, color(170, 20, 20), -legAngle);
+          }
+
+          // 3. 畫身體 (夾在中間)
+          fill(legoRed);
+          beginShape();
+          vertex(-tTop/2, -torsoH/2);
+          vertex(tTop/2, -torsoH/2);
+          vertex(tBottom/2, torsoH/2);
+          vertex(-tBottom/2, torsoH/2);
+          endShape(CLOSE);
+
+          // 4. 畫「靠近螢幕(前面)」的腿
+          if (leftIsFront) {
+            // 左腳在前面
+            drawLeg(-legW/2 - legGap, torsoH/2, legW, legH, footH, legoRed, -legAngle);
+          } else {
+            // 右腳在前面
+            drawLeg(legW/2 + legGap, torsoH/2, legW, legH, footH, legoRed, legAngle);
+          }
+
+          // 5. 畫「靠近螢幕(前面)」的那隻手 (會蓋在身體上方)
+          if (leftIsFront) {
+            drawLeftArm();
+          } else {
+            drawRightArm();
+          }
+
+          // 6. 頭部與脖子 (最上層)
+          fill(legoYellow);
+          // 脖子 (極短)
+          rectMode(CENTER);
+          rect(0, -torsoH/2 - 2 * scaleFactor, 16 * scaleFactor, 4 * scaleFactor);
+          
+          // 頭
+          let headS = 35 * scaleFactor;
+          let headY = -torsoH/2 - headS/2 - 4 * scaleFactor;
+          rect(0, headY, headS * 1.1, headS, 8 * scaleFactor);
+          
+          // 頭頂凸點
+          rect(0, headY - headS/2 - 3 * scaleFactor, 18 * scaleFactor, 7 * scaleFactor, 2 * scaleFactor);
+        }
+
+        // 修改 drawLeg 讓它支援從原點旋轉
+        function drawLeg(x, y, w, h, fh, col, angle) {
+          push();
+          translate(x, y); // 移到大腿根部 (旋轉中心)
+          rotate(angle);
+          fill(col);
+          rectMode(CENTER);
+          rect(0, h/2, w, h);
+          rect(0, h + fh/2, w + 2*scaleFactor, fh, 2*scaleFactor);
+          pop();
+        }
+
+        function drawCHandDown(s, col) {
+          fill(col);
+          let rIn = 5 * s;
+          let rOut = 10 * s;
+          beginShape();
+          for (let a = 180; a <= 360; a += 10) {
+            let x = rOut * cos(radians(a));
+            let y = rOut * sin(radians(a));
+            vertex(x, y);
+          }
+          for (let a = 360; a >= 180; a -= 10) {
+            let x = rIn * cos(radians(a));
+            let y = rIn * sin(radians(a));
+            vertex(x, y);
+          }
+          endShape(CLOSE);
+        }
+    </script>
+</body>
+</html>
