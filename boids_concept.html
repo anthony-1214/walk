@@ -444,6 +444,44 @@
             }
         }
 
+        function getFloorBounds(y_orig) {
+            let min_y = 250; // 允許走到更深的角落 (只要不碰到氣球底部)
+            let max_y = 650; // 提高底部絕對限制，完全避開下方黑色深淵
+            let x_left, x_right;
+
+            // 左側邊界
+            if (y_orig < 500) {
+                x_left = 560 - 1.64 * (y_orig - 250);
+            } else if (y_orig < 600) {
+                x_left = 150 - 0.5 * (y_orig - 500);
+            } else {
+                // 底部倒 V 型左側 (急速向右收縮至中心)
+                x_left = 100 + 3.0 * (y_orig - 600);
+            }
+
+            // 右側邊界
+            if (y_orig < 360) {
+                x_right = 560 + 1.27 * (y_orig - 250);
+            } else if (y_orig < 600) {
+                x_right = 700 + 1.15 * (y_orig - 360);
+            } else {
+                // 底部倒 V 型右側 (急速向左收縮至中心)
+                x_right = 917 - 2.5 * (y_orig - 600);
+            }
+            
+            // 確保 x_left 不會大於 x_right (避免交叉)
+            if (x_left > x_right) {
+                let mid = (x_left + x_right) / 2;
+                x_left = mid;
+                x_right = mid;
+            }
+
+            x_left = Math.max(150, x_left);
+            x_right = Math.min(1100, x_right);
+
+            return { minX: x_left, maxX: x_right, minY: min_y, maxY: max_y };
+        }
+
         class Boid {
             constructor(x, y, characterDisplay) {
                 this.pos = new Vec2(x, y);
@@ -463,6 +501,8 @@
                 this.container = new PIXI.Container();
                 
                 this.shadow = new PIXI.Graphics();
+                // 陰影往下偏移到腳底的位置
+                this.shadow.y = 75; 
                 // 使用多層次疊加模擬柔和陰影，避免使用 WebGL Filter 導致的破圖問題
                 for (let i = 0; i < 6; i++) {
                     this.shadow.beginFill(0x000000, 0.08); 
@@ -611,6 +651,23 @@
                         }
                     }
 
+                    // 加入柔和的邊界排斥力 (Boundary Avoidance) 避免硬撞牆導致旋轉鬼畜
+                    if (window.bgTransform) {
+                        let bg = window.bgTransform;
+                        let origY = (this.pos.y - bg.y) / bg.scale;
+                        let origX = (this.pos.x - bg.x) / bg.scale;
+                        let bounds = getFloorBounds(origY);
+                        let margin = 40; // 邊緣預警距離
+                        let avoidForce = new Vec2(0, 0);
+
+                        if (origX < bounds.minX + margin) avoidForce.x += (bounds.minX + margin - origX) * 0.02;
+                        if (origX > bounds.maxX - margin) avoidForce.x -= (origX - (bounds.maxX - margin)) * 0.02;
+                        if (origY < bounds.minY + margin) avoidForce.y += (bounds.minY + margin - origY) * 0.02;
+                        if (origY > bounds.maxY - margin) avoidForce.y -= (origY - (bounds.maxY - margin)) * 0.02;
+                        
+                        this.acc.add(avoidForce);
+                    }
+
                     this.vel.add(this.acc);
                     if (this.restTimer <= 0) {
                         this.vel.limit(1.3); // 減慢行走速度
@@ -618,48 +675,63 @@
                     this.pos.add(this.vel);
                     this.acc.mult(0);
 
-                    let floorTop = pixiApp.screen.height * 0.35; 
-                    let floorBottom = pixiApp.screen.height * 0.9; 
+                    if (window.bgTransform) {
+                        let bg = window.bgTransform;
+                        let origY = (this.pos.y - bg.y) / bg.scale;
+                        let origX = (this.pos.x - bg.x) / bg.scale;
 
-                    if (this.pos.y > floorBottom) { 
-                        this.pos.y = floorBottom; 
-                        this.vel.y = -Math.abs(this.vel.y); 
-                    }
-                    if (this.pos.y < floorTop) { 
-                        this.pos.y = floorTop; 
-                        this.vel.y = Math.abs(this.vel.y); 
-                    }
+                        let bounds = getFloorBounds(origY);
 
-                    let t = (this.pos.y - floorTop) / (floorBottom - floorTop);
-                    t = Math.max(0, Math.min(1, t)); 
+                        // Y-axis constraints
+                        if (origY < bounds.minY) {
+                            origY = bounds.minY;
+                            this.vel.y = Math.abs(this.vel.y);
+                        } else if (origY > bounds.maxY) {
+                            origY = bounds.maxY;
+                            this.vel.y = -Math.abs(this.vel.y);
+                        }
 
-                    let floorLeft = pixiApp.screen.width * (0.35 - 0.2 * t);
-                    let floorRight = pixiApp.screen.width * (0.65 + 0.2 * t);
+                        // Re-fetch bounds as Y might have changed
+                        bounds = getFloorBounds(origY);
 
-                    if (this.pos.x > floorRight) { 
-                        this.pos.x = floorRight; 
-                        this.vel.x = -Math.abs(this.vel.x); 
-                    }
-                    if (this.pos.x < floorLeft) { 
-                        this.pos.x = floorLeft; 
-                        this.vel.x = Math.abs(this.vel.x); 
+                        // X-axis constraints
+                        if (origX < bounds.minX) {
+                            origX = bounds.minX;
+                            this.vel.x = Math.abs(this.vel.x);
+                            // 如果在底部漏斗區撞牆，強制往上走以避免卡死鬼畜
+                            if (origY > 550) this.vel.y = -Math.abs(this.vel.y);
+                        } else if (origX > bounds.maxX) {
+                            origX = bounds.maxX;
+                            this.vel.x = -Math.abs(this.vel.x);
+                            // 如果在底部漏斗區撞牆，強制往上走以避免卡死鬼畜
+                            if (origY > 550) this.vel.y = -Math.abs(this.vel.y);
+                        }
+
+                        // Map back to screen coordinates
+                        this.pos.x = origX * bg.scale + bg.x;
+                        this.pos.y = origY * bg.scale + bg.y;
                     }
                 }
 
                 this.container.x = this.pos.x;
                 this.container.y = this.pos.y;
-                
-                let floorTop = pixiApp.screen.height * 0.35;
-                let floorBottom = pixiApp.screen.height * 0.9;
-                let tDepth = (this.pos.y - floorTop) / (floorBottom - floorTop);
-                tDepth = Math.max(0, Math.min(1, tDepth));
-                
-                // 動態排序 Y 軸 (Z-Ordering)
-                this.container.zIndex = this.pos.y;
+                if (window.bgTransform) {
+                    let bg = window.bgTransform;
+                    let origY = (this.pos.y - bg.y) / bg.scale;
+                    
+                    let tDepth = (origY - 150) / (800 - 150);
+                    tDepth = Math.max(0, Math.min(1, tDepth));
+                    
+                    // 動態排序 Y 軸 (Z-Ordering)
+                    // 使用 origY 來排序會更精準，加上與前景物件的比較
+                    this.container.zIndex = origY;
 
-                // 透視縮放
-                let perspectiveScale = 0.5 + 0.6 * tDepth; 
-                this.container.scale.set(perspectiveScale);
+                    // 透視縮放，並乘上 bg.scale 確保視窗縮放時角色也會跟著縮放
+                    let perspectiveScale = (0.5 + 0.6 * tDepth) * bg.scale; 
+                    this.container.scale.set(perspectiveScale);
+                } else {
+                    this.container.zIndex = this.pos.y;
+                }
 
                 let isMovingRight = this.vel.x >= 0;
                 if (isTurning && this.lastGreetPartner) {
@@ -735,16 +807,20 @@
                 let characterDisplay = new LegoCharacter(randomTopColor, randomBottomColor);
                 // 模擬稍微調暗融入環境
                 characterDisplay.alpha = 0.95;
+                let rx = pixiApp.screen.width / 2;
+                let ry = pixiApp.screen.height / 2;
                 
-                let floorTop = pixiApp.screen.height * 0.35;
-                let floorBottom = pixiApp.screen.height * 0.9;
-                let ry = floorTop + Math.random() * (floorBottom - floorTop);
-                
-                let t = (ry - floorTop) / (floorBottom - floorTop);
-                let floorLeft = pixiApp.screen.width * (0.35 - 0.2 * t);
-                let floorRight = pixiApp.screen.width * (0.65 + 0.2 * t);
-                
-                let rx = floorLeft + Math.random() * (floorRight - floorLeft);
+                if (window.bgTransform) {
+                    let bg = window.bgTransform;
+                    // 在原始座標內隨機生成
+                    let origY = 250 + Math.random() * (650 - 250);
+                    let bounds = getFloorBounds(origY);
+                    let origX = bounds.minX + Math.random() * (bounds.maxX - bounds.minX);
+                    
+                    // 轉換回螢幕座標
+                    rx = origX * bg.scale + bg.x;
+                    ry = origY * bg.scale + bg.y;
+                }
                 
                 let boid = new Boid(rx, ry, characterDisplay);
                 boid.boidId = "user_" + i; 
